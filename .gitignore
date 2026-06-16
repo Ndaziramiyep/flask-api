@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+uploads/*
+!uploads/.gitkeep
+# Allow trained models needed for deployment
+# *.pkl  <-- removed so flask-api/models/*.pkl are committed
