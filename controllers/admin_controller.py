@@ -54,6 +54,51 @@ def get_user(current_user, user_id):
     return jsonify({'success': True, 'data': {**_safe_user(user), 'scanCount': scan_count}}), 200
 
 
+def update_user(current_user, user_id):
+    data = request.get_json() or {}
+    updates = {}
+
+    name = (data.get('name') or '').strip()
+    if name:
+        if len(name) < 2:
+            return jsonify({'success': False, 'message': 'Name must be at least 2 characters'}), 400
+        updates['name'] = name
+
+    email = (data.get('email') or '').strip().lower()
+    if email:
+        if '@' not in email:
+            return jsonify({'success': False, 'message': 'Invalid email address'}), 400
+        try:
+            conflict = users_col.find_one({'email': email, '_id': {'$ne': ObjectId(user_id)}})
+        except Exception:
+            return jsonify({'success': False, 'message': 'Invalid user ID'}), 400
+        if conflict:
+            return jsonify({'success': False, 'message': 'Email already in use by another account'}), 400
+        updates['email'] = email
+
+    role = data.get('role')
+    if role is not None:
+        if role not in ('user', 'admin'):
+            return jsonify({'success': False, 'message': 'Role must be user or admin'}), 400
+        updates['role'] = role
+
+    notif = data.get('notificationsEnabled')
+    if notif is not None:
+        updates['notificationsEnabled'] = bool(notif)
+
+    if not updates:
+        return jsonify({'success': False, 'message': 'No fields to update'}), 400
+
+    updates['updatedAt'] = datetime.utcnow()
+    try:
+        users_col.update_one({'_id': ObjectId(user_id)}, {'$set': updates})
+        user = users_col.find_one({'_id': ObjectId(user_id)})
+    except Exception:
+        return jsonify({'success': False, 'message': 'Invalid user ID'}), 400
+
+    return jsonify({'success': True, 'message': 'User updated', 'data': _safe_user(user)}), 200
+
+
 def update_user_role(current_user, user_id):
     data = request.get_json()
     role = data.get('role')
