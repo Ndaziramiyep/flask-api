@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import request, jsonify
 from bson import ObjectId
 from config.database import users_col, detections_col, notifications_col
@@ -109,6 +109,62 @@ def get_admin_stats(current_user):
             'diseaseBreakdown': [{'disease': d['_id'], 'count': d['count']} for d in disease_breakdown],
             'recentUsers': [_safe_user(u) for u in recent_users],
             'recentScans': [ser_scan(s) for s in recent_scans],
+        },
+    }), 200
+
+
+def get_report(current_user):
+    period = request.args.get('period', 'monthly')
+    date_str = request.args.get('date', '')
+
+    try:
+        if period == 'weekly':
+            start = datetime.strptime(date_str, '%Y-%m-%d')
+            end = start + timedelta(days=7)
+        else:
+            year, month = (int(x) for x in date_str.split('-'))
+            start = datetime(year, month, 1)
+            end = datetime(year + 1, 1, 1) if month == 12 else datetime(year, month + 1, 1)
+    except Exception:
+        return jsonify({'success': False, 'message': 'Invalid date. Use YYYY-MM-DD (weekly) or YYYY-MM (monthly)'}), 400
+
+    query = {'createdAt': {'$gte': start, '$lt': end}}
+    scans = list(detections_col.find(query).sort('createdAt', 1))
+
+    breakdown = list(detections_col.aggregate([
+        {'$match': query},
+        {'$group': {'_id': '$disease', 'count': {'$sum': 1}, 'avgConf': {'$avg': '$confidence'}}},
+        {'$sort': {'count': -1}},
+    ]))
+
+    total    = len(scans)
+    healthy  = sum(1 for s in scans if s.get('disease') == 'Healthy')
+    avg_conf = round(sum(s.get('confidence', 0) for s in scans) / total, 2) if total else 0
+
+    def ser(d):
+        d = dict(d)
+        d['_id'] = str(d['_id'])
+        if 'createdAt' in d and hasattr(d['createdAt'], 'isoformat'):
+            d['createdAt'] = d['createdAt'].isoformat()
+        d.pop('allPredictions', None)
+        return d
+
+    return jsonify({
+        'success': True,
+        'data': {
+            'period': period,
+            'from': start.isoformat(),
+            'to': end.isoformat(),
+            'totalScans': total,
+            'healthyScans': healthy,
+            'diseasedScans': total - healthy,
+            'avgConfidence': avg_conf,
+            'diseaseBreakdown': [
+                {'disease': d['_id'] or 'Unknown', 'count': d['count'],
+                 'avgConfidence': round(d['avgConf'] or 0, 2)}
+                for d in breakdown
+            ],
+            'scans': [ser(s) for s in scans],
         },
     }), 200
 
