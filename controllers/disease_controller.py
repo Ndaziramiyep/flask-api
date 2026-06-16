@@ -74,7 +74,7 @@ def predict(current_user):
         os.remove(file_path)
         return jsonify({
             'success': False,
-            'message': 'No tea leaf detected. Please upload a clear photo of a tea leaf.',
+            'message': 'Uncertain image. Please try with a clearer photo of a tea leaf.',
         }), 422
 
     disease = result['disease']
