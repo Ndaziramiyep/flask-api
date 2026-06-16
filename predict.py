@@ -9,7 +9,7 @@ warnings.filterwarnings('ignore')
 MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
 CONFIDENCE_THRESHOLD = 0.50
 
-# Alphabetical order matches sklearn LabelEncoder default used during training
+# Alphabetical order — matches sklearn LabelEncoder default used during training
 CLASS_NAMES = [
     'Brown Blight',
     'Gray Blight',
@@ -20,40 +20,35 @@ CLASS_NAMES = [
     'Tea Algal Leaf Spot',
 ]
 
-_mobilenet = None
+_ort_session = None
 _svm = None
 _scaler = None
 
 
 def _load_models():
-    """Load MobileNetV2 feature extractor + scaler + SVM classifier."""
-    global _mobilenet, _svm, _scaler
-    if _mobilenet is not None:
+    """Load ONNX MobileNetV2 feature extractor + StandardScaler + SVM."""
+    global _ort_session, _svm, _scaler
+    if _ort_session is not None:
         return True
 
-    svm_path = os.path.join(MODELS_DIR, 'svm_model.pkl')
+    onnx_path   = os.path.join(MODELS_DIR, 'mobilenet_features.onnx')
+    svm_path    = os.path.join(MODELS_DIR, 'svm_model.pkl')
     scaler_path = os.path.join(MODELS_DIR, 'scaler.pkl')
-    if not (os.path.exists(svm_path) and os.path.exists(scaler_path)):
-        print('Model files not found.')
+
+    if not all(os.path.exists(p) for p in [onnx_path, svm_path, scaler_path]):
+        print('One or more model files missing.')
         return False
 
     try:
         import joblib
-        import tensorflow as tf
+        import onnxruntime as ort
 
-        # MobileNetV2 extracts 1280-dim feature vectors (GlobalAveragePooling)
-        base = tf.keras.applications.MobileNetV2(
-            input_shape=(224, 224, 3),
-            include_top=False,
-            weights='imagenet',
-            pooling='avg',
+        _ort_session = ort.InferenceSession(
+            onnx_path, providers=['CPUExecutionProvider']
         )
-        base.trainable = False
-        _mobilenet = base
-
         _scaler = joblib.load(scaler_path)
-        _svm = joblib.load(svm_path)
-        print('Models loaded: MobileNetV2 + StandardScaler + SVM')
+        _svm    = joblib.load(svm_path)
+        print('Models loaded: ONNX MobileNetV2 + StandardScaler + SVM')
         return True
     except Exception as e:
         print(f'Model load error: {e}')
@@ -70,37 +65,35 @@ def _looks_like_photo(image_bytes: bytes) -> bool:
 
 
 def _extract_features(image_bytes: bytes) -> np.ndarray:
-    """Preprocess image and extract 1280-dim MobileNetV2 features."""
+    """Preprocess and extract 1280-dim features via ONNX MobileNetV2."""
     img = Image.open(io.BytesIO(image_bytes)).convert('RGB').resize((224, 224), Image.LANCZOS)
     arr = np.array(img, dtype=np.float32)
-    arr = (arr / 127.5) - 1.0          # MobileNetV2 expects [-1, 1]
-    arr = np.expand_dims(arr, axis=0)
-    features = _mobilenet.predict(arr, verbose=0)  # shape (1, 1280)
-    return _scaler.transform(features)              # scaled (1, 1280)
+    arr = (arr / 127.5) - 1.0              # MobileNetV2 preprocessing: [-1, 1]
+    arr = np.expand_dims(arr, axis=0)      # (1, 224, 224, 3)
+    inp_name = _ort_session.get_inputs()[0].name
+    features = _ort_session.run(None, {inp_name: arr})[0]  # (1, 1280)
+    return _scaler.transform(features)
 
 
 def predict_from_bytes(image_bytes: bytes) -> dict:
     """
-    Run tea disease prediction on raw image bytes.
+    Predict tea leaf disease from raw image bytes.
     Returns: {disease, confidence, all_predictions, rejected}
-    rejected=True means the image is not a tea leaf or confidence is too low.
+    rejected=True when image is not a tea leaf or confidence < 50%.
     """
-    # Reject obvious non-photos before running the heavy model
     if not _looks_like_photo(image_bytes):
         return _rejected_response()
 
     if not _load_models():
-        # Demo fallback if models fail to load
         return _demo_response(image_bytes)
 
     features = _extract_features(image_bytes)
-    proba = _svm.predict_proba(features)[0]          # shape (7,)
+    proba    = _svm.predict_proba(features)[0]
 
-    idx = int(np.argmax(proba))
+    idx        = int(np.argmax(proba))
     confidence = float(proba[idx])
-    disease = CLASS_NAMES[idx]
-
-    rejected = confidence < CONFIDENCE_THRESHOLD
+    disease    = CLASS_NAMES[idx]
+    rejected   = confidence < CONFIDENCE_THRESHOLD
 
     all_predictions = sorted(
         [{'disease': CLASS_NAMES[i], 'probability': float(p)} for i, p in enumerate(proba)],
@@ -109,31 +102,31 @@ def predict_from_bytes(image_bytes: bytes) -> dict:
     )
 
     return {
-        'disease': disease,
-        'confidence': confidence,
+        'disease':         disease,
+        'confidence':      confidence,
         'all_predictions': all_predictions,
-        'rejected': rejected,
+        'rejected':        rejected,
     }
 
 
 def _rejected_response() -> dict:
     proba = np.ones(len(CLASS_NAMES)) / len(CLASS_NAMES)
     return {
-        'disease': 'Unknown',
-        'confidence': 0.0,
-        'all_predictions': [{'disease': c, 'probability': float(p)} for c, p in zip(CLASS_NAMES, proba)],
-        'rejected': True,
+        'disease':         'Unknown',
+        'confidence':      0.0,
+        'all_predictions': [{'disease': c, 'probability': float(p)}
+                            for c, p in zip(CLASS_NAMES, proba)],
+        'rejected':        True,
     }
 
 
 def _demo_response(image_bytes: bytes) -> dict:
-    seed = int.from_bytes(image_bytes[:8], 'big') % (2 ** 31)
-    rng = np.random.default_rng(seed)
-    proba = rng.dirichlet(np.ones(len(CLASS_NAMES)) * 0.5)
-    idx = int(np.argmax(proba))
+    seed  = int.from_bytes(image_bytes[:8], 'big') % (2 ** 31)
+    proba = np.random.default_rng(seed).dirichlet(np.ones(len(CLASS_NAMES)) * 0.5)
+    idx   = int(np.argmax(proba))
     return {
-        'disease': CLASS_NAMES[idx],
-        'confidence': float(proba[idx]),
+        'disease':         CLASS_NAMES[idx],
+        'confidence':      float(proba[idx]),
         'all_predictions': sorted(
             [{'disease': CLASS_NAMES[i], 'probability': float(p)} for i, p in enumerate(proba)],
             key=lambda x: x['probability'],
