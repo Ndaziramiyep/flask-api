@@ -103,7 +103,14 @@ def login():
         return jsonify({'success': False, 'message': 'Email and password are required'}), 400
 
     user = users_col.find_one({'email': email})
-    if not user or not bcrypt.checkpw(password.encode('utf-8'), user['password']):
+    if not user:
+        return jsonify({'success': False, 'message': 'Invalid email or password'}), 401
+
+    stored_pw = user['password']
+    if isinstance(stored_pw, str):
+        stored_pw = stored_pw.encode('utf-8')
+
+    if not bcrypt.checkpw(password.encode('utf-8'), stored_pw):
         return jsonify({'success': False, 'message': 'Invalid email or password'}), 401
 
     token = create_access_token(identity=str(user['_id']))
